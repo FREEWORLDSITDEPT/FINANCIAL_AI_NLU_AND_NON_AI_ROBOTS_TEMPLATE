@@ -1,0 +1,366 @@
+
+name: financial-demo cicd
+
+on:
+  push:
+    paths:
+    - 'data/**'
+    - 'config.yml'
+    - 'domain.yml'
+    - 'actions/**'
+    - '.github/trigger.txt'
+
+env:
+  # Keep in sync with Makefile
+  # TODO: check if we can avoid duplicate settings
+  AWS_REGION: us-west-2
+  AWS_ECR_URI: 024629701212.dkr.ecr.us-west-2.amazonaws.com
+  AWS_ECR_REPOSITORY: financial-demo
+  AWS_S3_BUCKET_NAME: rasa-financial-demo
+  
+  # Notes: 
+  # (-) rasa & rasa-sdk versions are extracted from `requirements.txt`
+  # (-) check https://rasa.com/docs/rasa-x/changelog/compatibility-matrix/
+  RASA_ENTERPRISE_VERSION: "0.38.1"
+  
+jobs:
+  params:
+    name: params
+    runs-on: ubuntu-latest
+    # Map step outputs to job outputs, for use by downstream jobs
+    outputs:
+      rasa_enterprise_version: ${{ steps.versions.outputs.rasa_enterprise_version }}
+      rasa_version: ${{ steps.versions.outputs.rasa_version }}
+      rasa_sdk_version: ${{ steps.versions.outputs.rasa_sdk_version }}
+      
+      do_action_server: ${{ steps.action_server.outputs.do_action_server }}
+      
+      do_training: ${{ steps.rasa_model.outputs.do_training }}
+      
+      aws_region: ${{ steps.aws.outputs.aws_region }}
+      aws_s3: ${{ steps.aws.outputs.aws_s3 }}
+      
+      do_create_cluster: ${{ steps.aws.outputs.do_create_cluster }}
+      aws_eks_create: ${{ steps.aws.outputs.aws_eks_create }}
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+          
+      - name: files
+        id: files
+        uses: jitterbit/get-changed-files@v1
+        
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: versions
+        id: versions
+        run: |
+          rasa_version=$( cat requirements.txt | grep 'rasa\[spacy\]' | cut -d'=' -f 3 )-spacy-en
+          rasa_sdk_version=$( cat requirements.txt | grep 'rasa-sdk' | cut -d'=' -f 3 )
+          
+          echo "::set-output name=rasa_enterprise_version::${{ env.RASA_ENTERPRISE_VERSION }}"
+          echo "::set-output name=rasa_version::$rasa_version"
+          echo "::set-output name=rasa_sdk_version::$rasa_sdk_version"
+        
+      - name: action_server
+        id: action_server
+        run: |
+          if [[ "${{ steps.files.outputs.all }}" == *"actions/"* ]]
+          then
+            echo "::set-output name=do_action_server::true"
+          else
+            echo "::set-output name=do_action_server::false"
+          fi
+
+      - name: rasa_model
+        id: rasa_model
+        run: |
+          if [[ "${{ steps.files.outputs.all }}" == *"data/"* ]] || \
+             [[ "${{ steps.files.outputs.all }}" == *"config.yml"* ]] || \
+             [[ "${{ steps.files.outputs.all }}" == *"domain.yml"* ]]
+          then
+            echo "::set-output name=do_training::true"
+          else
+            echo "::set-output name=do_training::false"
+          fi
+      
+      - name: aws
+        id: aws
+        run: |
+          echo "::set-output name=aws_region::${{ env.AWS_REGION }}"
+          echo "::set-output name=aws_s3::${{ env.AWS_S3_BUCKET_NAME }}"
+              
+          if [[ $(make aws-eks-cluster-exists) = True ]]
+          then
+            echo "::set-output name=do_create_cluster::false"
+          else
+            echo "::set-output name=do_create_cluster::true"
+          fi
+
+        
+  params_summary:
+    name: params_summary
+    runs-on: ubuntu-latest
+    needs: [params]
+    steps:
+    - name: params_summary
+      run: |
+        echo rasa_enterprise_version : ${{ needs.params.outputs.rasa_enterprise_version }}
+        echo rasa_version : ${{ needs.params.outputs.rasa_version }}
+        echo rasa_sdk_version : ${{ needs.params.outputs.rasa_sdk_version }}
+        
+        echo do_action_server: ${{ needs.params.outputs.do_action_server }}
+        
+        echo do_training: ${{ needs.params.outputs.do_training }}
+        
+        echo aws_region: ${{ needs.params.outputs.aws_region }}
+        echo aws_s3: ${{ needs.params.outputs.aws_s3 }}
+        
+        echo do_create_cluster: ${{ needs.params.outputs.do_create_cluster }}
+#
+#    - name: Dump GitHub context
+#      env:
+#        GITHUB_CONTEXT: ${{ toJSON(github) }}
+#      run: |
+#        echo "$GITHUB_CONTEXT"
+#        exit 1
+    
+  
+  action_server:
+    name: action_server (to AWS ECR)
+    runs-on: ubuntu-latest
+    needs: [params, params_summary]
+    if: needs.params.outputs.do_action_server  == 'true'
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+        
+      - name: Set up Python 3.7
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.7
+          
+      - name: Cache pip
+        # see: https://docs.github.com/en/actions/guides/building-and-testing-python#caching-dependencies
+        uses: actions/cache@v2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-dev.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+            ${{ runner.os }}-
+            
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements-dev.txt
+          
+      - name: Python Code Formatting Tests
+        working-directory: ${{ github.workspace }}
+        run: |
+          make lint
+          
+      - name: Python Type Checking
+        working-directory: ${{ github.workspace }}
+        run: |
+          make types
+          
+      - name: Python Unit Tests
+        working-directory: ${{ github.workspace }}
+        run: |
+          make test
+
+      - id: action_server
+        name: Build docker image
+        run: |
+          make docker-build        
+          
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Push docker image to AWS ECR
+        run: |
+          make aws-ecr-docker-login
+          make docker-push
+
+  rasa_model:
+    name: rasa_model (to AWS S3)
+    runs-on: ubuntu-latest
+    needs: [params, params_summary]
+    if: needs.params.outputs.do_training  == 'true'
+    services:
+       # Label used to access the service container
+       duckling:
+         image: rasa/duckling
+         ports:
+         # Maps port 8000 on service container to port 8000 on host VM
+         - 8000:8000
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+        
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+          python -m spacy download en_core_web_md
+          python -m spacy link en_core_web_md en
+      
+      - name: Train the rasa model
+        run: |
+          make rasa-train
+ 
+      - name: Run the end-2-end tests the rasa model
+        run: |
+          make rasa-test
+          
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.params.outputs.aws_region }}
+          
+      - name: Upload the model to S3
+        run: |
+          make aws-s3-upload-rasa-model
+
+  aws_eks_create_cluster:
+    name:  aws_eks_create_cluster
+    runs-on: ubuntu-latest
+    needs: [params, params_summary]
+    if: needs.params.outputs.do_create_cluster  == 'true'
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.params.outputs.aws_region }}
+      
+      - name: install CLIs
+        run: |
+          make install-eksctl
+          make install-kubectl
+          
+      - name: cluster
+        run: |
+            make aws-eks-cluster-create
+          
+  deploy_to_test_cluster:
+    name: deploy_to_test_cluster
+    runs-on: ubuntu-latest
+    needs: [params, aws_eks_create_cluster, rasa_model, action_server]
+    # UNCOMMENT THIS LINE FOR DEVELOPMENT PURPOSES, TO ALWAYS RUN THIS JOB
+    if: always()
+    steps: 
+      - name: checkout
+        uses: actions/checkout@v2
+        
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.params.outputs.aws_region }}
+      
+      - name: install CLIs & dependencies
+        run: |
+          make install-eksctl
+          make install-kubectl
+          make install-helm
+          make install-jp
+
+      - name: configure kubectl
+        run: |
+          make aws-eks-cluster-update-kubeconfig
+
+      - name: create namespace if not exists
+        run: |
+          make aws-eks-namespace-create
+
+      # Enable cluster to pull the private rasa enterprise image
+      - name: create/refresh gcr-pull-secret
+        env:
+          GCR_AUTH_JSON_PRIVATE_KEY_ID: ${{ secrets.GCR_AUTH_JSON_PRIVATE_KEY_ID }}
+          GCR_AUTH_JSON_PRIVATE_KEY: ${{ secrets.GCR_AUTH_JSON_PRIVATE_KEY }}
+          GCR_AUTH_JSON_CLIENT_EMAIL: ${{ secrets.GCR_AUTH_JSON_CLIENT_EMAIL }}
+          GCR_AUTH_JSON_CLIENT_ID: ${{ secrets.GCR_AUTH_JSON_CLIENT_ID }}
+        run: |
+          make pull-secret-gcr-create
+          
+      # Enable cluster to pull the private action server image
+      - name: create/refresh ecr-pull-secret
+        run: |
+          make pull-secret-ecr-create
+          
+      - name: Install or Upgrade Rasa Enterprise
+        env:
+          GLOBAL_POSTGRESQL_POSTGRESQLPASSWORD: ${{ secrets.GLOBAL_POSTGRESQL_POSTGRESQLPASSWORD }}
+          GLOBAL_REDIS_PASSWORD: ${{ secrets.GLOBAL_REDIS_PASSWORD }}
+          RABBITMQ_RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_RABBITMQ_PASSWORD }}
+          RASAX_INITIALUSER_USERNAME: ${{ secrets.RASAX_INITIALUSER_USERNAME }}
+          RASAX_INITIALUSER_PASSWORD: ${{ secrets.RASAX_INITIALUSER_PASSWORD }}
+          RASAX_JWTSECRET: ${{ secrets.RASAX_JWTSECRET }}
+          RASAX_PASSWORDSALT: ${{ secrets.RASAX_PASSWORDSALT }}
+          RASAX_TOKEN: ${{ secrets.RASAX_TOKEN }}
+          RASA_TOKEN: ${{ secrets.RASA_TOKEN }}
+        run: |
+          make rasa-enterprise-install
+          
+      - name: Check Rasa Enterprise Health
+        run: |
+          # Need to give rasa-prod container some time...
+          sleep 30
+          make rasa-enterprise-check-health
+          
+      - name: Deploy rasa model
+        env:
+          RASAX_INITIALUSER_USERNAME: ${{ secrets.RASAX_INITIALUSER_USERNAME }}
+          RASAX_INITIALUSER_PASSWORD: ${{ secrets.RASAX_INITIALUSER_PASSWORD }}
+          
+        run: |
+          make aws-s3-download-rasa-model
+          make rasa-enterprise-model-delete
+          make rasa-enterprise-model-upload
+          sleep 2
+          make rasa-enterprise-model-tag
+          # Give rasa-prod some time to unpack & load the model
+          sleep 30
+          
+      - name: Smoketest
+        env:
+          RASAX_INITIALUSER_USERNAME: ${{ secrets.RASAX_INITIALUSER_USERNAME }}
+          RASAX_INITIALUSER_PASSWORD: ${{ secrets.RASAX_INITIALUSER_PASSWORD }}
+        run: |
+          make rasa-enterprise-smoketest
+
+  deploy_to_prod_cluster:
+    name: deploy_to_prod_cluster
+    runs-on: ubuntu-latest
+    needs: [params, deploy_to_test_cluster]
+    steps:          
+      - run: |
+          echo "TO BE IMPLEMENTED"
+          exit 1
+ 
+# TODO:
+# (-) Remove all the... if: always()
+# (-) Cleanup of infrastructure if an aws-sit steps fail
+#      https://docs.github.com/en/actions/reference/context-and-expression-syntax-for-github-actions#needs-context
+# (-) Use aws-sagemaker-gpu container to train the rasa model
+# (-) Makefile & Dockerfile to extract rasa_sdk version from requirements.txt
+# (-) Clean up Makefile help

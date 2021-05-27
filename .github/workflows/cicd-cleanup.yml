@@ -1,0 +1,98 @@
+name: financial-demo cicd cleanup
+
+# Trigger `delete` works only once workflow is pushed to default branch
+on: [delete]
+
+env:
+  AWS_REGION: us-west-2
+  AWS_ECR_URI: 024629701212.dkr.ecr.us-west-2.amazonaws.com
+  AWS_ECR_REPOSITORY: financial-demo
+  AWS_S3_BUCKET_NAME: rasa-financial-demo
+
+jobs:
+  params:
+    name: params
+    runs-on: ubuntu-latest
+    # Map step outputs to job outputs, for use by downstream jobs
+    outputs:      
+      docker_registry: ${{ steps.action_server.outputs.docker_registry }}
+      
+      aws_region: ${{ steps.aws.outputs.aws_region }}
+      aws_s3: ${{ steps.aws.outputs.aws_s3 }}
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+        
+      - name: action_server
+        id: action_server
+        run: |
+          echo "::set-output name=docker_registry::${{ env.AWS_ECR_URI }}"
+          # deleted branch name
+          
+      - name: rasa_model
+        id: rasa_model
+        run: |
+          # deleted branch name
+      
+      - name: aws
+        id: aws
+        run: |
+          echo "::set-output name=aws_region::${{ env.AWS_REGION }}"
+          echo "::set-output name=aws_s3::${{ env.AWS_S3_BUCKET_NAME }}"
+        
+  params_summary:
+    name: params_summary
+    runs-on: ubuntu-latest
+    needs: [params]
+    steps:
+    - name: params_summary
+      run: |
+        echo docker_registry : ${{ needs.params.outputs.docker_registry }}
+        
+        echo do_training: ${{ needs.params.outputs.do_training }}
+        
+        echo aws_region: ${{ needs.params.outputs.aws_region }}
+        echo aws_s3: ${{ needs.params.outputs.aws_s3 }}
+#
+#    - name: Dump GitHub context
+#      env:
+#        GITHUB_CONTEXT: ${{ toJSON(github) }}
+#      run: |
+#        echo "$GITHUB_CONTEXT"
+#        exit 1
+
+  aws-cleanup:
+    name:  aws-cleanup
+    runs-on: ubuntu-latest
+    needs: [params]
+    if: github.event.ref_type == 'branch'
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+      
+      - name: Configure AWS Credentials
+        if: ${{ needs.params.outputs.aws_eks_create == 'true' }}
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.params.outputs.aws_region }}
+      
+      - name: aws-eks-delete-test-cluster
+        run: |
+          echo "TO BE IMPLEMENTED"
+          exit 1
+          make aws-eks-delete ....
+          
+      - name: aws-ecr-delete-test-images
+        run: |
+          echo "TO BE IMPLEMENTED"
+          exit 1
+          make aws-ecr-delete-images ....
+          
+      - name: aws-s3-delete-test-models
+        run: |
+          echo "TO BE IMPLEMENTED"
+          exit 1
+          make aws-s3-delete-files ....

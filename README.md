@@ -258,21 +258,400 @@ As part of the deployment, you'll need to set up [git integration](https://rasa.
 
 You will need to have docker installed in order to build the action server image. If you haven't made any changes to the action code, you can also use the [public image on Dockerhub](https://hub.docker.com/r/rasa/financial-demo) instead of building it yourself.
 
-
-See the Dockerfile for what is included in the action server image,
-
-To build the image:
+Build & tag the image:
 
 ```bash
-docker build . -t <name of your custom image>:<tag of your custom image>
+export ACTION_SERVER_DOCKERPATH=<dockerID>/<name-of-image>:<tag-of-image>
+make docker-build
 ```
 
-To test the container locally, you can then run the action server container with:
+Run the action server container:
 
 ```bash
-docker run -p 5055:5055 <name of your custom image>:<tag of your custom image>
+make docker-run
 ```
 
-Once you have confirmed that the container works as it should, you can push the container image to a registry with `docker push`
+Perform a smoke test on the health endpoint:
 
-It is recommended to use an [automated CI/CD process](https://rasa.com/docs/rasa/user-guide/setting-up-ci-cd) to keep your action server up to date in a production environment.
+```bash
+make docker-test
+```
+
+Once you have confirmed that the container works as it should, push the container image to a registry:
+
+```bash
+# login to a container registry with your credentials
+docker login  
+
+# check the registry logged into
+docker system info | grep Registry
+
+# push the action server image
+make docker-push
+```
+
+# CI/CD
+
+Tips on creating a [CI/CD pipeline](https://rasa.com/docs/rasa/user-guide/setting-up-ci-cd) for Rasa.
+
+## GitHub Secrets
+
+In your Github repository, go to `Settings > Secrets`, and add these `New repository secrets` . When entering the value, do not use quotes.
+
+#### AWS IAM User API Keys:
+
+To allow the GitHub actions to configure the aws cli, create IAM User API Keys as described below, and add them as GitHub Secrets to the repo:
+
+- AWS_ACCESS_KEY_ID = `Access key ID`
+- AWS_SECRET_ACCESS_KEY = `Secret access key` 
+
+#### Rasa Enterprise License:
+
+To allow the GitHub actions to define a pull secret for the private GCR repo, get the private values from your Rasa Enterprise license file ([docs](https://rasa.com/docs/rasa-x/installation-and-setup/install/helm-chart#5-configure-rasa-x-image)) and add them as GitHub Secrets to the repo:
+
+- GCR_AUTH_JSON_PRIVATE_KEY_ID = `private_key_id`
+- GCR_AUTH_JSON_PRIVATE_KEY = `private_key`
+- GCR_AUTH_JSON_CLIENT_EMAIL = `client_email`
+- GCR_AUTH_JSON_CLIENT_ID = `client_id`
+
+#### Helm chart Credentials
+
+To allow the GitHub actions to use safe_credentials in the `values.yml` ([docs](https://rasa.com/docs/rasa-x/installation-and-setup/install/helm-chart#3-configure-credentials)), add following GitHub Secrets to the repo, replacing each `<safe credential>` with a different alphanumeric string, and choose a `<username>` for the initial user. 
+
+*(Please use **safe credentials** to avoid data breaches)*
+
+- GLOBAL_POSTGRESQL_POSTGRESQLPASSWORD = `<safe credential>`
+- GLOBAL_REDIS_PASSWORD = `<safe credential>`
+- RABBITMQ_RABBITMQ_PASSWORD = `<safe credential>`
+- RASAX_INITIALUSER_USERNAME = `<username>`
+- RASAX_INITIALUSER_PASSWORD = `<safe credential>`
+- RASAX_JWTSECRET = `<safe credential>`
+- RASAX_PASSWORDSALT = `<safe credential>`
+- GLOBAL_POSTGRESQL_POSTGRESQLPASSWORD = `<safe credential>`
+- GLOBAL_POSTGRESQL_POSTGRESQLPASSWORD = `<safe credential>`
+
+
+
+## AWS Preparation
+
+The CI/CD pipeline of financial-demo uses AWS.
+
+After cloning or forking the financial-demo GitHub repository you must set up the following items before the pipeline can run.
+
+### IAM User API Keys
+
+The CI/CD pipeline uses the [aws cli](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2-linux.html#cliv2-linux-install).
+
+The [aws cli](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2-linux.html#cliv2-linux-install) needs a set of IAM User API keys for authentication & authorization:
+
+- In your AWS Console, go to IAM dashboard to create a new set of API keys:
+
+  - Click on Users
+
+  - Click on Add user
+
+    - User name = findemo  *(The actual name is not important, we will never use this name directly)*
+
+      Choose "**programmatic access**." This allows you to use the aws cli to interact with AWS.
+
+    - Click on Next: Permissions
+
+      - Click on *Attach existing policies directly*
+
+        For IAM access, you can choose “**AdministratorAccess**”, or limit access to only what is needed by the CD pipeline.
+
+    - Click on Next: Tags
+
+    - Click on Next: Review
+
+    - Click on Create user
+
+    - Store in a safe location: `Access key ID` & `Secret access key`
+
+
+### SSH Key Pair
+
+To be able to SSH into the EC2 worker nodes of the EKS cluster, you need an SSH Key Pair
+
+- In your AWS Console, go to **EC2 > Key Pairs**, and create a Key Pair with the name `findemo`, and download the file `findemo.pem` which contains the private SSH key. 
+  **Note that the name `findemo` is important, since it is used by the CI/CD pipeline when the cluster is created.**
+
+### Local AWS CLI
+
+Before the CI/CD pipeline can run, you will use the AWS CLI locally to create some items, so also install & configure the CLI locally.
+
+#### Install AWS CLI v2
+
+See the [installation instructions](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html).
+
+#### Configure your AWS CLI
+
+```bash
+# AWS CLI version 2.1.26 or later
+aws --version
+
+# Configure AWS CLI
+aws configure
+AWS Access Key ID [None]: -----          # See above: IAM User API Keys
+AWS Secret Access Key [None]: -------    # See above: IAM User API Keys
+Default region name [None]: us-west-2    # The CI/CD pipeline uses us-west-2 
+Default output format [None]: 
+
+# Check your configuration
+aws configure list [--profile profile-name]
+
+# verify it works
+aws s3 ls
+```
+
+### AWS ECR & S3 bucket
+
+#### TODO: do in CI/CD pipeline
+
+The CI pipeline creates two artifacts:
+
+- An action server docker **image**, which is pushed to an **AWS ECR** repository.
+- A trained rasa **model**, which is copied to an **AWS S3** bucket
+
+Run these commands to create the storage for these artifacts. These commands run the AWS CLI and create an ECR repository and an S3 bucket with the name of the checked out branch:
+
+```bash
+make aws-ecr-create-repository
+make aws-s3-create-bucket
+```
+
+## Run the CI/CD pipeline manually
+
+The CI/CD steps are automatically run by the GitHub actions when you push changes but you can also run many steps manually from your local computer. This can help with bootstrapping & debugging.
+
+### Preparation
+
+There are two ways to create AWS EKS clusters:
+
+- [eksctl](https://eksctl.io/):
+  - [eksctl – the EKS CLI](https://aws.amazon.com/blogs/opensource/eksctl-eks-cli/)
+  - [Getting strated with Amazon EKS - eksctl](https://docs.aws.amazon.com/eks/latest/userguide/getting-started-eksctl.html)
+  - [eksctl: Amazon EKS Cluster with One Command](https://aws.amazon.com/blogs/opensource/eksctl-eks-cluster-one-command/)
+- [aws cli](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-welcome.html) + AWS Management Console
+  - [aws eks Command Reference](https://awscli.amazonaws.com/v2/documentation/api/latest/reference/eks/index.html)
+  - It is not possible to launch worker nodes to a cluster control plane from the *aws* cli. When using *aws* cli to create the cluster control plane, it is required to use the Console, which makes it unsuited for a CI/CD pipeline.
+  - The *aws* cli is still very useful for querying the aws resources created.
+
+
+
+#### Install eksctl
+
+See the [installation instructions](https://docs.aws.amazon.com/eks/latest/userguide/eksctl.html)
+
+#### Install kubectl
+
+See the [installation instructions](https://kubernetes.io/docs/tasks/tools/#kubectl)
+
+#### Install helm
+
+See the [installation instructions](https://helm.sh/docs/intro/install/)
+
+#### Set environment variables
+
+There are many ways to set the required environment variables in your local environment prior to running the pipeline steps. 
+
+One way is to create a file  `./secret/envs_export`, which is in the `.gitignore` of the repo, with this content:
+
+```bash
+# source this file to set the environment variables the same as the GitHub secrets.
+export GCR_AUTH_JSON_PRIVATE_KEY_ID=...
+export GCR_AUTH_JSON_PRIVATE_KEY='-----BEGIN PRIVATE KEY-...-END PRIVATE KEY-----\n'
+export GCR_AUTH_JSON_CLIENT_EMAIL='...'
+export GCR_AUTH_JSON_CLIENT_ID=...
+export GLOBAL_POSTGRESQL_POSTGRESQLPASSWORD=...
+export GLOBAL_REDIS_PASSWORD=...
+export RABBITMQ_RABBITMQ_PASSWORD=...
+export RASAX_INITIALUSER_USERNAME=admin
+export RASAX_INITIALUSER_PASSWORD=...
+export RASAX_JWTSECRET=...
+export RASAX_PASSWORDSALT=...
+export RASAX_TOKEN=...
+export RASA_TOKEN=...
+```
+
+Then, create the environment variable with the command:
+
+```bash
+source ./secret/envs_export
+```
+
+
+
+### Run the jobs locally
+
+#### job: action_server
+
+```bash
+# Test the python code
+pip install -r requirements-dev.txt
+make lint
+make types
+make test
+
+# Build, run & test the action server docker image
+make docker-build
+make docker-run
+make docker-test
+
+# Login & push the action server docker image
+make aws-ecr-docker-login
+make docker-push
+
+# Clean it up
+make docker-clean-container
+make docker-clean-image
+```
+
+#### job: rasa_model
+
+```bash
+# Train the model
+make rasa-train
+
+# In another window, start duckling server
+docker run -p 8000:8000 rasa/duckling
+
+# Run the end-2-end tests
+make rasa-test
+
+# Upload the model to S3
+make aws-s3-upload-rasa-model
+```
+
+Notes:
+
+- The CI/CD pipeline uses a GitHub action [rasa-train-test-gha](https://github.com/RasaHQ/rasa-train-test-gha).
+- The commands `make rasa-train` & `make rasa-test` are provided for local development purposes only. 
+
+#### job: aws_eks_create_cluster
+
+```bash
+# Create an EKS cluster with managed nodes
+make aws-eks-cluster-create 
+```
+
+This command uses *eksctl* to create many AWS resources with CloudFormation templates. 
+
+Some of these AWS resources are:
+
+- A VPC with
+  - Public & private subnets
+  - Internet & NAT Gateways
+  - Route Tables
+- An IAM EKS service role
+- An EKS Cluster Control Plane
+- An EKS Managed nodegroup of EC2 instances
+
+The cluster context is also added to the `~/.kube/config` file.
+
+The VPC created looks like this (TODO: UPDATE IMAGE TO THE ONE USED BY EKSCTL)
+
+![](images/financial-demo-eks-test-vpc.png)
+
+The EKS Control Plane interacts with the the EKS Data Plane (the nodes), like this:
+
+![img](https://d2908q01vomqb2.cloudfront.net/fe2ef495a1152561572949784c16bf23abb28057/2020/04/10/subnet_pubpri.png)
+
+##### Test kubectl
+
+Test that kubectl can interact with cluster
+
+```bash
+kubectl get nodes
+NAME                                           STATUS   ROLES    AGE     VERSION
+ip-192-168-15-186.us-west-2.compute.internal   Ready    <none>   3m33s   v1.19.6-eks-49a6c0
+ip-192-168-48-70.us-west-2.compute.internal    Ready    <none>   3m32s   v1.19.6-eks-49a6c0
+
+kubectl get svc
+NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+kubernetes   ClusterIP   10.100.0.1   <none>        443/TCP   56m
+```
+
+#### job: deploy_to_test_cluster
+
+```bash
+# Create the namespace `my-namespace`
+make aws-eks-namespace-create
+
+# Enable cluster to pull the private rasa enterprise image
+make pull-secret-gcr-create
+
+# Enable cluster to pull the private action server image
+make pull-secret-ecr-create
+
+# Install or Upgrade Rasa Enterprise
+make rasa-enterprise-install
+
+# Deploy rasa model
+make aws-s3-download-rasa-model
+make rasa-enterprise-model-delete
+make rasa-enterprise-model-upload
+make rasa-enterprise-model-tag
+
+# Smoketest
+make rasa-enterprise-smoketest
+```
+
+
+
+#### deploy_to_prod_cluster
+
+TO DO
+
+#### Cleanup
+
+TO DO
+
+#### Manual Cleanup
+
+Sometimes things do not clean up properly, and you need to do a manual cleanup in the **AWS console**:
+
+- **CloudFormation**: Try to delete all the stacks in reverse order as they were created by the eksctl command.
+
+- When a stack fails to delete due to dependencies, you have two options:
+
+  - Select to retain the resources that have dependency errors. (**NOT RECOMMENDED**)
+
+    The stack delete operation will simply skip deleting them. This is NOT recommended, because you will clutter up your AWS account with many unused resources.
+
+  - Manually delete the resources that the stack is not able to delete. (**RECOMMENDED**)
+
+    You do this by drilling down into the **CloudFormation stack delete events** messages, and delete items bottom-up the dependency tree.
+
+    One example of a bottom-up delete sequence is when deletion of the VPC fails:
+
+    - **EC2 > Load Balancers**: first, delete the ELB load balancers
+    - **VPC > Subnets**: then, delete the subnets 
+      - This will also delete the EC2 > Network interfaces, named `eni-xxxx`
+      - You cannot delete Subnets until the ELB load balancers are deleted
+    - **VPC > Your VPCs**: finally, delete the VPC 
+      - This will also delete all associated:
+        - security groups (`sg-xxx`)
+        - internet gateways (`igw-xxx`)
+        - subnets (`subnet-xxx`)
+
+  - After cleaning up, try again to delete the **AWS CloudFormation** stack.
+
+  - If it still does not delete, iterate the manual cleanups until it does.
+
+    Again, this can be a painful process, but once the CloudFormation stacks delete properly without retaining/skipping anything, you are guaranteed that you have cleaned up all the resources created by the CI/CD pipeline.
+
+## Appendix A: AWS EKS references
+
+The following references are good to learn about AWS EKS.
+
+- [eksctl – the EKS CLI](https://aws.amazon.com/blogs/opensource/eksctl-eks-cli/)
+- [Getting strated with Amazon EKS - eksctl](https://docs.aws.amazon.com/eks/latest/userguide/getting-started-eksctl.html)
+- [eksctl: Amazon EKS Cluster with One Command](https://aws.amazon.com/blogs/opensource/eksctl-eks-cluster-one-command/)
+- [aws eks Command Reference (cli)](https://awscli.amazonaws.com/v2/documentation/api/latest/reference/eks/index.html)
+- https://aws.amazon.com/blogs/containers/de-mystifying-cluster-networking-for-amazon-eks-worker-nodes/
+- https://docs.aws.amazon.com/eks/latest/userguide/create-public-private-vpc.html
+- https://docs.aws.amazon.com/eks/latest/userguide/eks-compute.html
+- https://logz.io/blog/amazon-eks-cluster/amp/
+- https://www.eksworkshop.com/
+

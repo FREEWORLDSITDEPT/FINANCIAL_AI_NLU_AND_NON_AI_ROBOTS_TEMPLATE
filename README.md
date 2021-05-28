@@ -1,3 +1,5 @@
+# The original Rasa Financial Bot information is below unedited. The [FINANCIAL_AI_NLU_AND_NON_AI_ROBOTS_TEMPLATE](https://github.com/FREEWORLDSITDEPT/FINANCIAL_AI_NLU_AND_NON_AI_ROBOTS_TEMPLATE) info would for the nearest time be inserted and edited above in this `README.md` file.
+
 # Notes on Rasa `2.x / 1.x`
 
 1. The `main` branch of this repo is compatible with Rasa Open Source **version 2.x**
